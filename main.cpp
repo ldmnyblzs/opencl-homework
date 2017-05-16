@@ -1,71 +1,77 @@
-// Skeleton.cpp : Defines the entry point for the console application.
-//
-
 #include <iostream>
-#include <vector>
-#include <cmath>
+#include <iomanip>
+#include <random>
+#include <string>
 
-#include "util.hpp"
 
-const size_t bufferSize = 1024;
+#include "inputlayer.hpp"
+#include "outputlayer.hpp"
 
-int main()
+int main(int argc, char* argv[])
 {
-  cl_int err = CL_SUCCESS;
-
-  std::vector<cl::Platform> platforms;
-  cl::Platform::get(&platforms);
-  if (platforms.size() == 0)
+  try
     {
-      std::cout << "Unable to find suitable platform." << std::endl;
-      return -1;
-    }
+      InputLayer input(2, 1);
+      Layer hidden(2, 1, &input);
+      OutputLayer output(1, &hidden);
 
-  cl_context_properties properties[] =
-    { CL_CONTEXT_PLATFORM, (cl_context_properties)(platforms[0])(), 0 };
-  cl::Context context(CL_DEVICE_TYPE_GPU, properties);
+      cl_int error;
+      float data[] = {1.0f, 1.0f, 1.0f, 0.0f,
+		      1.0f, 0.0f, 1.0f, 1.0f,
+		      0.0f, 1.0f, 1.0f, 1.0f,
+		      0.0f, 0.0f, 1.0f, 0.0f};
+      cl::Buffer buffer = Context::getInstance().createBuffer(CL_MEM_READ_WRITE,
+							      sizeof(float) * 16,
+							      NULL);
 
-  std::vector<cl::Device> devices = context.getInfo<CL_CONTEXT_DEVICES>();
+      Context::getInstance().writeBuffer(buffer,
+					 true,
+					 0,
+					 sizeof(float) * 16,
+					 data);
 
-  std::string programSource = FileToString("kernels/square.cl");
-  cl::Program program = cl::Program(context, programSource);
-  program.build(devices);
-
-  cl::Kernel kernel(program, "square", &err);
-
-  std::vector<float> hostBuffer;
-  for (size_t index = 0; index < bufferSize; ++index)
-    {
-      hostBuffer.push_back(static_cast<float>(index));
-    }
-
-  cl::Buffer clInputBuffer = cl::Buffer(context, CL_MEM_READ_ONLY, sizeof(float) * bufferSize, NULL, &err);
-  cl::Buffer clResultBuffer = cl::Buffer(context, CL_MEM_READ_WRITE, sizeof(float) * bufferSize, NULL, &err);
-	
-  cl::Event event;
-  cl::CommandQueue queue(context, devices[0], 0, &err);
-  queue.enqueueWriteBuffer(clInputBuffer, true, 0, sizeof(float) * bufferSize, hostBuffer.data());
-  kernel.setArg(0, clInputBuffer);
-  kernel.setArg(1, clResultBuffer);
-  queue.enqueueNDRangeKernel(kernel,
-			     cl::NullRange,
-			     cl::NDRange(bufferSize, 1),
-			     cl::NullRange,
-			     NULL,
-			     &event);
-  event.wait();
-
-  std::vector<float> resultBuffer(bufferSize);
-  queue.enqueueReadBuffer(clResultBuffer, true, 0, sizeof(float) * bufferSize, resultBuffer.data());
-
-  for (size_t index = 0; index < bufferSize; ++index)
-    {
-      if (resultBuffer[index] != std::pow(hostBuffer[index], 2))
+      cl::Buffer subbuffers[8];
+      for (unsigned char i = 0; i < 4; ++i)
 	{
-	  std::cout << "Wrong result [" << index << "]: h=" << std::pow(hostBuffer[index], 2) << " g=" << resultBuffer[index] << std::endl;
-	  break;
+	  cl_buffer_region info = {i * 4 * sizeof(float), 3 * sizeof(float)};
+	  subbuffers[i] = buffer.createSubBuffer(CL_MEM_READ_WRITE,
+						 CL_BUFFER_CREATE_TYPE_REGION,
+						 &info);
+	  cl_buffer_region info2 = {(i * 4 + 3) * sizeof(float), sizeof(float)};
+	  subbuffers[i + 4] = buffer.createSubBuffer(CL_MEM_READ_WRITE,
+						     CL_BUFFER_CREATE_TYPE_REGION,
+						     &info2);
+	}
+
+      std::cout << std::setiosflags(std::ios::fixed) << std::setprecision(4);
+      for (std::size_t epoch = 0; epoch < std::stol(argv[1]); epoch++)
+	{
+	  for (std::size_t index = 0; index < 4; ++index)
+	    {
+	      input.setInputBuffer(subbuffers[index]);
+	      input.forward();
+	      output.setTargetBuffer(subbuffers[index + 4]);
+	      output.backward();
+	      output.update();
+	      if (0 == (epoch % 3))
+		Context::getInstance().finish();
+	    }
+	}
+
+      for (std::size_t index = 0; index < 4; ++index)
+	{
+	  input.setInputBuffer(subbuffers[index]);
+	  input.forward();
+	  std::cout << data[index * 4] << '\t' << data[index * 4 + 1];
+	  for (auto o : output.getOutput())
+	    std::cout << '\t' << o;
+	  std::cout << std::endl;
 	}
     }
-
+  catch (std::exception &e)
+    {
+      std::cerr << e.what() << std::endl;
+    }
+  
   return 0;
 }
